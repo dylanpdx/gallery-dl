@@ -47,6 +47,18 @@ class BlueskyExtractor(Extractor):
 
     def items(self):
         for post in self.posts():
+            
+            if "post" not in post and "value" in post and post["value"]["$type"] == "app.bsky.feed.like":
+                uri = post["value"]["subject"]["uri"][5:]
+                path = uri.split("/")
+                did = path[0]
+                post_id = path[-1]
+                try:
+                    post = self.api.get_post_thread(did, post_id)[0]
+                except exception.StopExtraction as e:
+                    if 'NotFound' in e.message:
+                        continue # this can happen if the post is deleted, because it still is in the "likes" feed; TODO: handle this better
+            
             if "post" in post:
                 post = post["post"]
             if self._user_did and post["author"]["did"] != self._user_did:
@@ -250,7 +262,7 @@ class BlueskyLikesExtractor(BlueskyExtractor):
     example = "https://bsky.app/profile/HANDLE/likes"
 
     def posts(self):
-        return self.api.get_actor_likes(self.user)
+        return self.api.list_records(self.user, "app.bsky.feed.like")
 
 
 class BlueskyFeedExtractor(BlueskyExtractor):
@@ -372,13 +384,17 @@ class BlueskyAPI():
             self.root = "https://api.bsky.app"
             self.authenticate = util.noop
 
-    def get_actor_likes(self, actor):
-        endpoint = "app.bsky.feed.getActorLikes"
+    def list_records(self, actor, collection):
+        endpoint = "com.atproto.repo.listRecords"
+        actor_did = self._did_from_actor(actor)
+        actor_service_endpoint = self.service_endpoint(actor_did)
         params = {
-            "actor": self._did_from_actor(actor),
+            "repo": actor_did,
+            "collection": collection,
             "limit": "100",
+            "reverse":False
         }
-        return self._pagination(endpoint, params)
+        return self._pagination(endpoint, params,key = "records", root = actor_service_endpoint)
 
     def get_author_feed(self, actor, filter="posts_and_author_threads"):
         endpoint = "app.bsky.feed.getAuthorFeed"
@@ -523,8 +539,11 @@ class BlueskyAPI():
         _refresh_token_cache.update(self.username, data["refreshJwt"])
         return "Bearer " + data["accessJwt"]
 
-    def _call(self, endpoint, params):
-        url = "{}/xrpc/{}".format(self.root, endpoint)
+    def _call(self, endpoint, params, root=None):
+        if not root:
+            url = "{}/xrpc/{}".format(self.root, endpoint)
+        else:
+            url = "{}/xrpc/{}".format(root, endpoint)
 
         while True:
             self.authenticate()
@@ -549,9 +568,9 @@ class BlueskyAPI():
             self.extractor.log.debug("Server response: %s", response.text)
             raise exception.StopExtraction(msg)
 
-    def _pagination(self, endpoint, params, key="feed"):
+    def _pagination(self, endpoint, params, key="feed", root = None):
         while True:
-            data = self._call(endpoint, params)
+            data = self._call(endpoint, params,root = root)
             yield from data[key]
 
             cursor = data.get("cursor")
